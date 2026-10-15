@@ -82,11 +82,14 @@ enum Keychain {
 }
 
 final class Recorder {
-    private let engine = AVAudioEngine()
+    private var engine: AVAudioEngine?
     var onChunk: ((Data) -> Void)?
     var onLevel: ((Float) -> Void)?
 
     func start() throws {
+        // A fresh engine per recording follows the current default mic after a device change.
+        let engine = AVAudioEngine()
+        self.engine = engine
         let input = engine.inputNode
         let inFormat = input.outputFormat(forBus: 0)
         let outFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: sampleRate, channels: 1, interleaved: true)!
@@ -118,8 +121,9 @@ final class Recorder {
     }
 
     func stop() {
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        engine?.inputNode.removeTap(onBus: 0)
+        engine?.stop()
+        engine = nil
     }
 }
 
