@@ -6,10 +6,24 @@ import ServiceManagement
 let endpoint = URL(string: "wss://stt-rt.soniox.com/transcribe-websocket")!
 let model = "stt-rt-v5"
 let sampleRate = 16_000.0
-let hotKeyCode: UInt16 = 61  // right Option
 let minHold = 0.25
 
 let defaults = UserDefaults.standard
+
+struct HotKey {
+    let code: UInt16
+    let flag: NSEvent.ModifierFlags
+    let name: String
+}
+
+let hotKeys = [
+    HotKey(code: 61, flag: .option, name: "Right Option ⌥"),
+    HotKey(code: 62, flag: .control, name: "Right Control ⌃"),
+    HotKey(code: 54, flag: .command, name: "Right Command ⌘"),
+    HotKey(code: 63, flag: .function, name: "fn"),
+]
+
+var hotKey: HotKey { hotKeys.first { $0.code == defaults.integer(forKey: "hotkey") } ?? hotKeys[0] }
 
 func languageHints() -> [String] {
     if let custom = defaults.stringArray(forKey: "languages"), !custom.isEmpty { return custom }
@@ -330,8 +344,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func flagsChanged(_ event: NSEvent) {
-        guard event.keyCode == hotKeyCode else { return }
-        event.modifierFlags.contains(.option) ? begin() : end()
+        let key = hotKey
+        guard event.keyCode == key.code else { return }
+        event.modifierFlags.contains(key.flag) ? begin() : end()
     }
 
     private func begin() {
@@ -394,6 +409,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         status.tag = 1
         menu.addItem(status)
         menu.addItem(.separator())
+        let keys = NSMenu()
+        for key in hotKeys {
+            let option = item(key.name, #selector(chooseHotKey(_:)))
+            option.tag = Int(key.code)
+            keys.addItem(option)
+        }
+        let keysItem = NSMenuItem(title: "Hotkey", action: nil, keyEquivalent: "")
+        keysItem.submenu = keys
+        menu.addItem(keysItem)
         menu.addItem(item("Press Enter after pasting", #selector(toggleAutoEnter)))
         menu.addItem(item("Launch at login", #selector(toggleLogin)))
         menu.addItem(item("Set Soniox API key…", #selector(askForKey)))
@@ -410,7 +434,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         let trusted = AXIsProcessTrusted()
-        menu.item(withTag: 1)?.title = trusted ? "Hold right ⌥ and speak" : "⚠️ Allow Accessibility access…"
+        menu.item(withTag: 1)?.title = trusted ? "Hold \(hotKey.name) and speak" : "⚠️ Allow Accessibility access…"
+        for option in menu.item(withTitle: "Hotkey")?.submenu?.items ?? [] {
+            option.state = option.tag == Int(hotKey.code) ? .on : .off
+        }
         menu.item(withTag: 1)?.isEnabled = !trusted
         menu.item(withTitle: "Press Enter after pasting")?.state = defaults.bool(forKey: "autoEnter") ? .on : .off
         menu.item(withTitle: "Launch at login")?.state = SMAppService.mainApp.status == .enabled ? .on : .off
@@ -418,6 +445,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func openAccessibility() {
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+    }
+
+    @objc private func chooseHotKey(_ sender: NSMenuItem) {
+        end()
+        defaults.set(sender.tag, forKey: "hotkey")
     }
 
     @objc private func toggleAutoEnter() { defaults.set(!defaults.bool(forKey: "autoEnter"), forKey: "autoEnter") }

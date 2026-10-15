@@ -22,7 +22,10 @@ This installs `Dictation.app` to `~/Applications` and starts it. On first launch
 
 **Usage:** hold **right Option (⌥)** and speak. A small waveform shows at the bottom of the screen while it listens. Release the key, and the text is pasted.
 
+No right Option key on your keyboard? Pick another hotkey from the menu bar icon → **Hotkey**: right Control, right Command or fn.
+
 The app lives in the menu bar and starts at login. You can change these settings from the menu bar icon:
+- Hotkey
 - Press Enter after pasting
 - Launch at login
 - Set the API key
