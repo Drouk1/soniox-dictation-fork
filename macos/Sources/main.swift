@@ -310,14 +310,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if apiKey == nil { askForKey() }
 
-        NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] in self?.flagsChanged($0) }
         NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] in self?.flagsChanged($0); return $0 }
         recorder.onLevel = { [weak self] level in DispatchQueue.main.async { self?.overlay.level = level } }
-        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
-            guard AXIsProcessTrusted() else { return }
-            timer.invalidate()
-            self?.setIcon(recording: false)
+        if AXIsProcessTrusted() {
+            startListening()
+        } else {
+            // A global monitor created before access is granted never fires, so wait for access.
+            Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
+                guard AXIsProcessTrusted() else { return }
+                timer.invalidate()
+                self?.startListening()
+            }
         }
+    }
+
+    private func startListening() {
+        NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] in self?.flagsChanged($0) }
+        setIcon(recording: false)
     }
 
     private func flagsChanged(_ event: NSEvent) {
