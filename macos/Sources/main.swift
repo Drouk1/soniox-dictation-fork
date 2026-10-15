@@ -289,6 +289,7 @@ final class Overlay {
         panel.hasShadow = true
         panel.level = .statusBar
         panel.ignoresMouseEvents = true
+        panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.contentView = wave
         panel.alphaValue = 0
