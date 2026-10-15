@@ -25,10 +25,37 @@ let hotKeys = [
 
 var hotKey: HotKey { hotKeys.first { $0.code == defaults.integer(forKey: "hotkey") } ?? hotKeys[0] }
 
+func lines(_ key: String) -> [String] {
+    (defaults.string(forKey: key) ?? "").split(whereSeparator: \.isNewline)
+        .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+}
+
 func languageHints() -> [String] {
-    if let custom = defaults.stringArray(forKey: "languages"), !custom.isEmpty { return custom }
+    let custom = (defaults.string(forKey: "languages") ?? "").split(whereSeparator: { ", ".contains($0) }).map(String.init)
+    if !custom.isEmpty { return custom }
     let system = Locale.preferredLanguages.compactMap { Locale(identifier: $0).language.languageCode?.identifier }
     return Array(NSOrderedSet(array: system + ["en"])) as! [String]
+}
+
+func applyReplacements(_ text: String) -> String {
+    let fold = { (s: String) in s.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil) }
+    return lines("replacements").reduce(text) { text, line in
+        guard let arrow = ["→", "->", "="].lazy.compactMap({ line.range(of: $0) }).first else { return text }
+        let heard = line[..<arrow.lowerBound].trimmingCharacters(in: .whitespaces)
+        let written = line[arrow.upperBound...].trimmingCharacters(in: .whitespaces)
+        guard !heard.isEmpty else { return text }
+        // Match on a folded copy so "ΠΟΥΣΑΡΕ" and "πουσαρε" also hit "πούσαρε".
+        let folded = fold(text)
+        let sameLength = folded.utf16.count == text.utf16.count
+        let haystack = sameLength ? folded : text
+        let pattern = "(?<![\\p{L}\\p{N}])" + NSRegularExpression.escapedPattern(for: sameLength ? fold(heard) : heard) + "(?![\\p{L}\\p{N}])"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { return text }
+        let result = NSMutableString(string: text)
+        for match in regex.matches(in: haystack, range: NSRange(location: 0, length: haystack.utf16.count)).reversed() {
+            result.replaceCharacters(in: match.range, with: written)
+        }
+        return result as String
+    }
 }
 
 enum Keychain {
@@ -116,7 +143,8 @@ final class Transcription {
             "language_hints": languageHints(),
             "enable_language_identification": true,
         ]
-        if let terms = defaults.stringArray(forKey: "terms"), !terms.isEmpty { config["context"] = ["terms": terms] }
+        let terms = lines("vocabulary")
+        if !terms.isEmpty { config["context"] = ["terms": terms] }
         let json = try! JSONSerialization.data(withJSONObject: config)
         task.send(.string(String(decoding: json, as: UTF8.self))) { _ in }
         receive()
@@ -311,8 +339,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let overlay = Overlay()
     private let recorder = Recorder()
     private var transcription: Transcription?
+    private let settings = SettingsWindow()
     private var pressedAt = Date.distantPast
-    private var apiKey = Keychain.read()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
@@ -322,7 +350,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             try? SMAppService.mainApp.register()
             defaults.set(true, forKey: "didRegisterLogin")
         }
-        if apiKey == nil { askForKey() }
+        if Keychain.read() == nil { settings.show() }
 
         NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] in self?.flagsChanged($0); return $0 }
         recorder.onLevel = { [weak self] level in DispatchQueue.main.async { self?.overlay.level = level } }
@@ -351,7 +379,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func begin() {
         guard transcription == nil else { return }
-        guard let apiKey else { return fail("No Soniox API key set") }
+        guard let apiKey = Keychain.read() else { return fail("No Soniox API key set") }
         let current = Transcription(apiKey: apiKey)
         recorder.onChunk = { current.send($0) }
         do {
@@ -381,6 +409,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             switch result {
             case .success(let text):
                 overlay.hide()
+                let text = applyReplacements(text)
                 if !text.isEmpty { paste(text, submit: defaults.bool(forKey: "autoEnter")) }
             case .failure(let error):
                 fail(error.localizedDescription)
@@ -405,76 +434,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setIcon(recording: false)
         let menu = NSMenu()
         menu.delegate = self
-        let status = item("", #selector(openAccessibility))
-        status.tag = 1
+        let status = NSMenuItem(title: "", action: #selector(openAccessibility), keyEquivalent: "")
+        status.target = self
         menu.addItem(status)
         menu.addItem(.separator())
-        let keys = NSMenu()
-        for key in hotKeys {
-            let option = item(key.name, #selector(chooseHotKey(_:)))
-            option.tag = Int(key.code)
-            keys.addItem(option)
-        }
-        let keysItem = NSMenuItem(title: "Hotkey", action: nil, keyEquivalent: "")
-        keysItem.submenu = keys
-        menu.addItem(keysItem)
-        menu.addItem(item("Press Enter after pasting", #selector(toggleAutoEnter)))
-        menu.addItem(item("Launch at login", #selector(toggleLogin)))
-        menu.addItem(item("Set Soniox API key…", #selector(askForKey)))
-        menu.addItem(.separator())
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
     }
 
-    private func item(_ title: String, _ action: Selector) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
-        item.target = self
-        return item
-    }
-
     func menuNeedsUpdate(_ menu: NSMenu) {
         let trusted = AXIsProcessTrusted()
-        menu.item(withTag: 1)?.title = trusted ? "Hold \(hotKey.name) and speak" : "⚠️ Allow Accessibility access…"
-        for option in menu.item(withTitle: "Hotkey")?.submenu?.items ?? [] {
-            option.state = option.tag == Int(hotKey.code) ? .on : .off
-        }
-        menu.item(withTag: 1)?.isEnabled = !trusted
-        menu.item(withTitle: "Press Enter after pasting")?.state = defaults.bool(forKey: "autoEnter") ? .on : .off
-        menu.item(withTitle: "Launch at login")?.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        menu.items.first?.title = trusted ? "Hold \(hotKey.name) and speak" : "⚠️ Allow Accessibility access…"
+        menu.items.first?.isEnabled = !trusted
     }
 
     @objc private func openAccessibility() {
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
     }
 
-    @objc private func chooseHotKey(_ sender: NSMenuItem) {
-        end()
-        defaults.set(sender.tag, forKey: "hotkey")
-    }
-
-    @objc private func toggleAutoEnter() { defaults.set(!defaults.bool(forKey: "autoEnter"), forKey: "autoEnter") }
-
-    @objc private func toggleLogin() {
-        let service = SMAppService.mainApp
-        try? service.status == .enabled ? service.unregister() : service.register()
-    }
-
-    @objc private func askForKey() {
-        let alert = NSAlert()
-        alert.messageText = "Soniox API key"
-        alert.informativeText = "Get one at console.soniox.com. It is stored in your macOS Keychain."
-        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = field
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let key = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty else { return }
-        Keychain.write(key)
-        apiKey = key
-    }
+    @objc private func openSettings() { settings.show() }
 }
 
 let app = NSApplication.shared

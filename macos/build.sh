@@ -16,7 +16,7 @@ if [[ -f $DUP && -f ${DUP:h}/bridging.modulemap ]]; then
   FLAGS+=(-vfsoverlay "$TMP/vfs.yaml" -Xcc -ivfsoverlay -Xcc "$TMP/vfs.yaml")
 fi
 
-swiftc $FLAGS Sources/main.swift -o "$APP/Contents/MacOS/Dictation"
+swiftc $FLAGS Sources/*.swift -o "$APP/Contents/MacOS/Dictation"
 codesign --force --sign - "$APP"
 
 pkill -x Dictation 2>/dev/null || true

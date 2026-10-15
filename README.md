@@ -22,13 +22,17 @@ This installs `Dictation.app` to `~/Applications` and starts it. On first launch
 
 **Usage:** hold **right Option (⌥)** and speak. A small waveform shows at the bottom of the screen while it listens. Release the key, and the text is pasted.
 
-No right Option key on your keyboard? Pick another hotkey from the menu bar icon → **Hotkey**: right Control, right Command or fn.
+The app lives in the menu bar and starts at login. Open **Settings…** from the menu bar icon to change:
 
-The app lives in the menu bar and starts at login. You can change these settings from the menu bar icon:
-- Hotkey
-- Press Enter after pasting
-- Launch at login
-- Set the API key
+- **Hotkey:** right Option, right Control, right Command or fn
+- **Press Enter after pasting**
+- **Launch at login**
+- **Vocabulary:** words you use often, one per line. Soniox recognises them more easily.
+- **Replacements:** fixes applied after transcription, one per line as `heard → written`. For example: `πούσαρε → push`. They ignore case and accents.
+- **Languages:** language hints. By default these are your system languages plus English.
+- **API key**
+
+Vocabulary and replacements cost nothing extra and add no delay.
 
 ## Windows
 
@@ -60,17 +64,6 @@ Settings are environment variables:
 | `DICTATION_TERMS` | `Kubernetes,Soniox` | Words to spell correctly |
 
 To change the key later, run `python dictate.py --set-key`.
-
-## Options (macOS)
-
-Language hints come from your system languages plus English. To override them, or to add words that should always be spelled correctly, run:
-
-```bash
-defaults write io.github.harabalos.dictation languages -array el en
-defaults write io.github.harabalos.dictation terms -array "Kubernetes" "Soniox"
-```
-
-Then restart the app.
 
 ## Notes
 
