@@ -313,6 +313,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] in self?.flagsChanged($0) }
         NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] in self?.flagsChanged($0); return $0 }
         recorder.onLevel = { [weak self] level in DispatchQueue.main.async { self?.overlay.level = level } }
+        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
+            guard AXIsProcessTrusted() else { return }
+            timer.invalidate()
+            self?.setIcon(recording: false)
+        }
     }
 
     private func flagsChanged(_ event: NSEvent) {
@@ -368,17 +373,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func setIcon(recording: Bool) {
-        statusItem.button?.image = NSImage(systemSymbolName: recording ? "waveform.circle.fill" : "waveform",
-                                           accessibilityDescription: "Dictation")
+        let symbol = recording ? "waveform.circle.fill" : AXIsProcessTrusted() ? "waveform" : "exclamationmark.triangle"
+        statusItem.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Dictation")
     }
 
     private func buildMenu() {
         setIcon(recording: false)
         let menu = NSMenu()
         menu.delegate = self
-        let hint = NSMenuItem(title: "Hold right ⌥ and speak", action: nil, keyEquivalent: "")
-        hint.isEnabled = false
-        menu.addItem(hint)
+        let status = item("", #selector(openAccessibility))
+        status.tag = 1
+        menu.addItem(status)
         menu.addItem(.separator())
         menu.addItem(item("Press Enter after pasting", #selector(toggleAutoEnter)))
         menu.addItem(item("Launch at login", #selector(toggleLogin)))
@@ -395,8 +400,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        let trusted = AXIsProcessTrusted()
+        menu.item(withTag: 1)?.title = trusted ? "Hold right ⌥ and speak" : "⚠️ Allow Accessibility access…"
+        menu.item(withTag: 1)?.isEnabled = !trusted
         menu.item(withTitle: "Press Enter after pasting")?.state = defaults.bool(forKey: "autoEnter") ? .on : .off
         menu.item(withTitle: "Launch at login")?.state = SMAppService.mainApp.status == .enabled ? .on : .off
+    }
+
+    @objc private func openAccessibility() {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
     }
 
     @objc private func toggleAutoEnter() { defaults.set(!defaults.bool(forKey: "autoEnter"), forKey: "autoEnter") }
