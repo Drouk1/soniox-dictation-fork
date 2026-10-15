@@ -1,0 +1,4 @@
+keyring
+pynput
+sounddevice
+websockets
