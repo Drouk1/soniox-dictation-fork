@@ -13,70 +13,67 @@ func containsWakePhrase(_ text: String) -> Bool {
     return items("wakeWords").map(normalized).contains { !$0.isEmpty && heard.contains(" \($0) ") }
 }
 
-/// Keeps the mic open while idle and listens for a double clap and/or the wake phrase.
+/// Drops everything up to and including the wake phrase: "OK, hey Claude, write…" → "Write…".
+/// Returns the text unchanged if the phrase isn't in it.
+func stripWakePhrase(_ text: String) -> String {
+    let folded = text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+    // Positions in the folded copy only carry over if folding didn't change the length.
+    guard folded.utf16.count == text.utf16.count else { return text }
+    for phrase in items("wakeWords") {
+        var words = normalized(phrase).split(separator: " ").map { NSRegularExpression.escapedPattern(for: String($0)) }
+        guard let last = words.last else { continue }
+        // Soniox sometimes hears the name a little differently ("hey clawed"), so only its start must match.
+        if last.count > 3 { words[words.count - 1] = String(last.prefix(3)) + "\\p{L}*" }
+        let pattern = "^.*?(?<![\\p{L}\\p{N}])" + words.joined(separator: "[^\\p{L}\\p{N}]+") + "(?![\\p{L}\\p{N}])[^\\p{L}\\p{N}]*"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]),
+              let match = regex.firstMatch(in: folded, range: NSRange(location: 0, length: folded.utf16.count)) else { continue }
+        let rest = (text as NSString).substring(from: match.range.upperBound)
+        return rest.prefix(1).uppercased() + rest.dropFirst()
+    }
+    return text
+}
+
+/// Watches idle mic audio for a double clap and/or the wake phrase.
 /// The wake phrase is recognised on this Mac; no audio leaves it until dictation starts.
 final class IdleListener {
     var onClap: (() -> Void)?
     var onWake: (() -> Void)?
-    private var engine: AVAudioEngine?
-    private var observer: NSObjectProtocol?
     private var claps = false
     private var wake = false
 
-    private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
     private let lock = NSLock()
+    private var detector: ClapDetector?
+    private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
     private var generation = 0
     private var refresh: Timer?
 
-    func start(claps: Bool, wake: Bool) {
-        if engine != nil, self.claps == claps, self.wake == wake { return }
-        stop()
-        guard claps || wake else { return }
-        let engine = AVAudioEngine()
-        let input = engine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0 else { return }
-        var detector = ClapDetector()
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-            guard let self else { return }
-            if claps, let samples = buffer.floatChannelData?[0],
-               detector.feed(samples, count: Int(buffer.frameLength), rate: format.sampleRate) {
-                DispatchQueue.main.async { self.onClap?() }
-            }
-            if wake {
-                lock.lock()
-                let request = request
-                lock.unlock()
-                request?.append(buffer)
-            }
+    func configure(claps: Bool, wake: Bool) {
+        if claps != self.claps {
+            lock.lock()
+            detector = claps ? ClapDetector() : nil
+            lock.unlock()
+            self.claps = claps
         }
-        engine.prepare()
-        do { try engine.start() } catch {
-            input.removeTap(onBus: 0)
-            return log("Idle listener failed: \(error.localizedDescription)")
-        }
-        self.engine = engine
-        self.claps = claps
-        self.wake = wake
-        if wake { startRecognition() }
-        // Follow the default mic when it changes.
-        observer = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
-            self?.stop()
-            self?.start(claps: claps, wake: wake)
+        if wake != self.wake {
+            self.wake = wake
+            wake ? startRecognition() : stopRecognition()
         }
     }
 
-    func stop() {
-        stopRecognition()
-        if let observer { NotificationCenter.default.removeObserver(observer) }
-        observer = nil
-        engine?.inputNode.removeTap(onBus: 0)
-        engine?.stop()
-        engine = nil
-        claps = false
-        wake = false
+    /// Called on the audio thread with every mic buffer.
+    func feed(_ buffer: AVAudioPCMBuffer) {
+        lock.lock()
+        defer { lock.unlock() }
+        if detector != nil, let samples = buffer.floatChannelData?[0],
+           detector!.feed(samples, count: Int(buffer.frameLength), rate: buffer.format.sampleRate) {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, claps else { return }
+                onClap?()
+            }
+        }
+        request?.append(buffer)
     }
 
     private func startRecognition() {
@@ -96,7 +93,7 @@ final class IdleListener {
             let heard = result.map { containsWakePhrase($0.bestTranscription.formattedString) } ?? false
             let done = error != nil || result?.isFinal == true
             DispatchQueue.main.async { [weak self] in
-                guard let self, current == generation, engine != nil else { return }
+                guard let self, current == generation, wake else { return }
                 if heard {
                     restartRecognition()
                     onWake?()
@@ -126,7 +123,7 @@ final class IdleListener {
     }
 
     private func restartRecognition() {
-        guard engine != nil, wake else { return }
+        guard wake else { return }
         stopRecognition()
         startRecognition()
     }

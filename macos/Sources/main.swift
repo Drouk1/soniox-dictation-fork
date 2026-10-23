@@ -18,7 +18,7 @@ defaults.register(defaults: [
     "silenceTimeout": 3.0,
     "sounds": true,
     "enterWords": "over, enter, όβερ, έντερ",
-    "wakeWords": "hey claude, hey cloud",
+    "wakeWords": "hey claude, hey cloud, χέι κλοντ",
 ])
 
 let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Dictation.log")
@@ -130,15 +130,18 @@ enum Keychain {
     }
 }
 
+/// The one place the mic is opened. It runs while dictating, and also while idle when
+/// claps or the wake word are on, so dictation can pick up without a gap.
 final class Recorder {
     private var engine: AVAudioEngine?
+    private var observer: NSObjectProtocol?
     var onChunk: ((Data) -> Void)?
     var onLevel: ((Float) -> Void)?
+    var onBuffer: ((AVAudioPCMBuffer) -> Void)?
 
     func start() throws {
-        // A fresh engine per recording follows the current default mic after a device change.
+        guard engine == nil else { return }
         let engine = AVAudioEngine()
-        self.engine = engine
         let input = engine.inputNode
         let inFormat = input.outputFormat(forBus: 0)
         let outFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: sampleRate, channels: 1, interleaved: true)!
@@ -153,6 +156,7 @@ final class Recorder {
                 vDSP_rmsqv(samples, 1, &rms, vDSP_Length(buffer.frameLength))
                 self.onLevel?(rms)
             }
+            self.onBuffer?(buffer)
             guard let out = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 32) else { return }
             var fed = false
             converter.convert(to: out, error: nil) { _, status in
@@ -166,13 +170,58 @@ final class Recorder {
             }
         }
         engine.prepare()
-        try engine.start()
+        do { try engine.start() } catch {
+            input.removeTap(onBus: 0)
+            throw error
+        }
+        self.engine = engine
+        // Follow the default mic when it changes.
+        observer = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
+            self?.stop()
+            do { try self?.start() } catch { log("Mic restart failed: \(error.localizedDescription)") }
+        }
     }
 
     func stop() {
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+        observer = nil
         engine?.inputNode.removeTap(onBus: 0)
         engine?.stop()
         engine = nil
+    }
+}
+
+/// Sends mic audio to the current transcription. While idle it keeps the last few seconds,
+/// so "Hey Claude, write…" can be said in one go and the words after the name aren't lost.
+final class AudioRouter {
+    private let lock = NSLock()
+    private var sink: Transcription?
+    private var recent: [Data] = []
+    private var recentBytes = 0
+    private let keepBytes = Int(sampleRate * 4) * 2
+
+    func route(_ chunk: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let sink { return sink.send(chunk) }
+        recent.append(chunk)
+        recentBytes += chunk.count
+        while recentBytes - recent[0].count >= keepBytes { recentBytes -= recent.removeFirst().count }
+    }
+
+    func attach(_ transcription: Transcription, withRecent: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        if withRecent { recent.forEach(transcription.send) }
+        recent = []
+        recentBytes = 0
+        sink = transcription
+    }
+
+    func detach() {
+        lock.lock()
+        sink = nil
+        lock.unlock()
     }
 }
 
@@ -196,7 +245,8 @@ final class Transcription {
             "language_hints": languageHints(),
             "enable_language_identification": true,
         ]
-        let terms = lines("vocabulary")
+        var terms = lines("vocabulary")
+        if defaults.bool(forKey: "wakeWord") { terms += items("wakeWords") }
         if !terms.isEmpty { config["context"] = ["terms": terms] }
         let json = try! JSONSerialization.data(withJSONObject: config)
         task.send(.string(String(decoding: json, as: UTF8.self))) { _ in }
@@ -396,6 +446,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let settings = SettingsWindow()
     private var pressedAt = Date.distantPast
     private let idle = IdleListener()
+    private let router = AudioRouter()
+    private var trigger = Trigger.hotkey
     private var handsFree = false
     private var lastSpeech = Date.distantPast
     private var lastInput = Date.distantPast
@@ -413,6 +465,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] in self?.flagsChanged($0); return $0 }
         recorder.onLevel = { [weak self] level in DispatchQueue.main.async { self?.heard(level) } }
+        recorder.onChunk = { [router] in router.route($0) }
+        recorder.onBuffer = { [idle] in idle.feed($0) }
         idle.onClap = { [weak self] in
             guard let self else { return }
             // Keys and trackpad clicks can sound like claps, so ignore claps heard while typing or clicking.
@@ -435,6 +489,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    // Opening the app again (double-click in Finder, `open`, Spotlight) shows Settings.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        settings.show()
+        return false
+    }
+
     private func startListening() {
         NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] in self?.flagsChanged($0) }
         NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown]) { [weak self] _ in self?.lastInput = Date() }
@@ -451,9 +511,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func begin(_ trigger: Trigger) {
         guard transcription == nil else { return }
         guard let apiKey = Keychain.read() else { return fail("No Soniox API key set") }
-        idle.stop()
+        idle.configure(claps: false, wake: false)
         let current = Transcription(apiKey: apiKey)
-        recorder.onChunk = { current.send($0) }
         do {
             try recorder.start()
         } catch {
@@ -461,7 +520,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             updateIdleListener()
             return fail(error.localizedDescription)
         }
+        // After the wake word, send the last few seconds too: they hold the name and whatever followed it.
+        router.attach(current, withRecent: trigger == .wake)
         transcription = current
+        self.trigger = trigger
         log("Listening (\(trigger.rawValue), Accessibility \(AXIsProcessTrusted() ? "on" : "off"))")
         pressedAt = Date()
         handsFree = trigger != .hotkey
@@ -484,7 +546,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func updateIdleListener() {
-        guard transcription == nil else { return idle.stop() }
+        guard transcription == nil else { return idle.configure(claps: false, wake: false) }
         var wake = defaults.bool(forKey: "wakeWord") && !items("wakeWords").isEmpty
         if wake {
             switch SFSpeechRecognizer.authorizationStatus() {
@@ -495,13 +557,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             default: wake = false
             }
         }
-        idle.start(claps: defaults.bool(forKey: "clapToStart"), wake: wake)
+        let claps = defaults.bool(forKey: "clapToStart")
+        idle.configure(claps: claps, wake: wake)
+        // Keep the mic open while idle only when something is listening for a clap or the name.
+        if claps || wake {
+            do { try recorder.start() } catch { log("Mic failed: \(error.localizedDescription)") }
+        } else {
+            recorder.stop()
+        }
     }
 
     private func end() {
         guard let current = transcription else { return }
-        recorder.stop()
+        router.detach()
         transcription = nil
+        let trigger = trigger
         handsFree = false
         updateIdleListener()
         setIcon(recording: false)
@@ -516,7 +586,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             switch result {
             case .success(let text):
                 overlay.hide()
-                let (spoken, enter) = splitEnterWord(text)
+                let (spoken, enter) = splitEnterWord(trigger == .wake ? stripWakePhrase(text) : text)
                 let text = applyReplacements(spoken)
                 let submit = enter || defaults.bool(forKey: "autoEnter")
                 log("Transcribed \(text.count) characters\(enter ? " + Enter word" : "")")
