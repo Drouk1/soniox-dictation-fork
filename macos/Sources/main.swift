@@ -7,6 +7,10 @@ let endpoint = URL(string: "wss://stt-rt.soniox.com/transcribe-websocket")!
 let model = "stt-rt-v5"
 let sampleRate = 16_000.0
 let minHold = 0.25
+// Hands-free mode (after a double clap) stops once the mic has been this quiet for this long.
+let speechLevel: Float = 0.01  // about -40 dB
+let silenceTimeout = 3.0
+let maxHandsFree = 300.0
 
 let defaults = UserDefaults.standard
 
@@ -346,10 +350,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var transcription: Transcription?
     private let settings = SettingsWindow()
     private var pressedAt = Date.distantPast
+    private let claps = ClapListener()
+    private var handsFree = false
+    private var lastSpeech = Date.distantPast
+    private var lastInput = Date.distantPast
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
-        AVCaptureDevice.requestAccess(for: .audio) { _ in }
+        AVCaptureDevice.requestAccess(for: .audio) { _ in DispatchQueue.main.async { self.updateClapListener() } }
         _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
         if !defaults.bool(forKey: "didRegisterLogin") {
             try? SMAppService.mainApp.register()
@@ -358,7 +366,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if Keychain.read() == nil { settings.show() }
 
         NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] in self?.flagsChanged($0); return $0 }
-        recorder.onLevel = { [weak self] level in DispatchQueue.main.async { self?.overlay.level = level } }
+        recorder.onLevel = { [weak self] level in DispatchQueue.main.async { self?.heard(level) } }
+        claps.onDoubleClap = { [weak self] in
+            guard let self else { return }
+            // Keys and trackpad clicks can sound like claps, so ignore claps heard while typing or clicking.
+            guard Date().timeIntervalSince(lastInput) > 1.5 else { return }
+            begin(handsFree: true)
+        }
+        NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.updateClapListener()
+        }
         if AXIsProcessTrusted() {
             startListening()
         } else {
@@ -373,6 +390,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func startListening() {
         NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] in self?.flagsChanged($0) }
+        NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown]) { [weak self] _ in self?.lastInput = Date() }
         setIcon(recording: false)
     }
 
@@ -382,27 +400,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         event.modifierFlags.contains(key.flag) ? begin() : end()
     }
 
-    private func begin() {
+    private func begin(handsFree: Bool = false) {
         guard transcription == nil else { return }
         guard let apiKey = Keychain.read() else { return fail("No Soniox API key set") }
+        claps.stop()
         let current = Transcription(apiKey: apiKey)
         recorder.onChunk = { current.send($0) }
         do {
             try recorder.start()
         } catch {
             current.cancel()
+            updateClapListener()
             return fail(error.localizedDescription)
         }
         transcription = current
         pressedAt = Date()
+        self.handsFree = handsFree
+        // A little extra time to start talking after the clap.
+        lastSpeech = Date().addingTimeInterval(1)
+        if handsFree { NSSound(named: "Tink")?.play() }
         overlay.show(.listening)
         setIcon(recording: true)
+    }
+
+    private func heard(_ level: Float) {
+        overlay.level = level
+        guard handsFree, transcription != nil else { return }
+        if level > speechLevel { lastSpeech = max(lastSpeech, Date()) }
+        if Date().timeIntervalSince(lastSpeech) > silenceTimeout || Date().timeIntervalSince(pressedAt) > maxHandsFree { end() }
+    }
+
+    private func updateClapListener() {
+        if defaults.bool(forKey: "clapToStart"), transcription == nil {
+            claps.start()
+        } else {
+            claps.stop()
+        }
     }
 
     private func end() {
         guard let current = transcription else { return }
         recorder.stop()
         transcription = nil
+        handsFree = false
+        updateClapListener()
         setIcon(recording: false)
         guard Date().timeIntervalSince(pressedAt) >= minHold else {
             current.cancel()
@@ -452,7 +493,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         let trusted = AXIsProcessTrusted()
-        menu.items.first?.title = trusted ? "Hold \(hotKey.name) and speak" : "⚠️ Allow Accessibility access…"
+        let clap = defaults.bool(forKey: "clapToStart") ? ", or clap twice" : ""
+        menu.items.first?.title = trusted ? "Hold \(hotKey.name) and speak\(clap)" : "⚠️ Allow Accessibility access…"
         menu.items.first?.isEnabled = !trusted
     }
 

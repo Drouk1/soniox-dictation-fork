@@ -22,9 +22,12 @@ This installs `Dictation.app` to `~/Applications` and starts it. On first launch
 
 **Usage:** hold **right Option (⌥)** and speak. A small waveform shows at the bottom of the screen while it listens. Release the key, and the text is pasted.
 
+**Hands-free:** turn on **Clap twice to start** in Settings. Clap twice, speak, and stop talking. After 3 seconds of silence the text is pasted. Claps heard while you type or click are ignored. With this on, the microphone stays open while Dictation is idle, so macOS shows the orange mic indicator.
+
 The app lives in the menu bar and starts at login. Open **Settings…** from the menu bar icon to change:
 
 - **Hotkey:** right Option, right Control, right Command or fn
+- **Clap twice to start**
 - **Press Enter after pasting**
 - **Launch at login**
 - **Vocabulary:** words you use often, one per line. Soniox recognises them more easily.

@@ -4,6 +4,7 @@ import SwiftUI
 struct SettingsView: View {
     @AppStorage("hotkey") private var hotkey = 61
     @AppStorage("autoEnter") private var autoEnter = false
+    @AppStorage("clapToStart") private var clapToStart = false
     @AppStorage("languages") private var languages = ""
     @AppStorage("vocabulary") private var vocabulary = ""
     @AppStorage("replacements") private var replacements = ""
@@ -16,6 +17,10 @@ struct SettingsView: View {
             Section {
                 Picker("Hotkey", selection: $hotkey) {
                     ForEach(hotKeys, id: \.code) { Text($0.name).tag(Int($0.code)) }
+                }
+                Toggle(isOn: $clapToStart) {
+                    Text("Clap twice to start")
+                    Text("Stops after 3 seconds of silence. Keeps the microphone on while idle.")
                 }
                 Toggle("Press Enter after pasting", isOn: $autoEnter)
                 Toggle("Launch at login", isOn: Binding(get: { launchAtLogin }, set: { on in
@@ -55,7 +60,7 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         // A grouped Form scrolls, so without a height the window collapses to its title bar on macOS 14.
-        .frame(width: 460, height: 640)
+        .frame(width: 460, height: 680)
     }
 
     private func editor(_ text: Binding<String>) -> some View {
