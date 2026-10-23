@@ -54,7 +54,8 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 460)
+        // A grouped Form scrolls, so without a height the window collapses to its title bar on macOS 14.
+        .frame(width: 460, height: 640)
     }
 
     private func editor(_ text: Binding<String>) -> some View {
