@@ -14,6 +14,21 @@ let maxHandsFree = 300.0
 
 let defaults = UserDefaults.standard
 
+let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Dictation.log")
+
+/// Appends a line to ~/Library/Logs/Dictation.log. Never logs what was said.
+func log(_ message: String) {
+    NSLog("Dictation: %@", message)
+    let line = "\(ISO8601DateFormatter().string(from: Date())) \(message)\n"
+    if let handle = try? FileHandle(forWritingTo: logURL) {
+        handle.seekToEndOfFile()
+        handle.write(Data(line.utf8))
+        try? handle.close()
+    } else {
+        try? Data(line.utf8).write(to: logURL)
+    }
+}
+
 struct HotKey {
     let code: UInt16
     let flag: NSEvent.ModifierFlags
@@ -356,6 +371,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastInput = Date.distantPast
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        log("Started, Accessibility \(AXIsProcessTrusted() ? "on" : "off")")
         buildMenu()
         AVCaptureDevice.requestAccess(for: .audio) { _ in DispatchQueue.main.async { self.updateClapListener() } }
         _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
@@ -414,6 +430,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return fail(error.localizedDescription)
         }
         transcription = current
+        log("Listening (\(handsFree ? "clap" : "hotkey"), Accessibility \(AXIsProcessTrusted() ? "on" : "off"))")
         pressedAt = Date()
         self.handsFree = handsFree
         // A little extra time to start talking after the clap.
@@ -450,13 +467,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return overlay.hide()
         }
         overlay.mode = .working
+        log("Stopped after \(String(format: "%.1f", Date().timeIntervalSince(pressedAt))) s")
         current.finish { [weak self] result in
             guard let self else { return }
             switch result {
             case .success(let text):
                 overlay.hide()
                 let text = applyReplacements(text)
-                if !text.isEmpty { paste(text, submit: defaults.bool(forKey: "autoEnter")) }
+                log("Transcribed \(text.count) characters")
+                guard !text.isEmpty else { return }
+                // Without Accessibility access the paste keystroke is silently dropped, so keep the text.
+                guard AXIsProcessTrusted() else {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(text, forType: .string)
+                    openAccessibility()
+                    return fail("Allow Accessibility access to paste. The text is on the clipboard, press ⌘V.")
+                }
+                paste(text, submit: defaults.bool(forKey: "autoEnter"))
             case .failure(let error):
                 fail(error.localizedDescription)
             }
@@ -464,7 +491,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func fail(_ message: String) {
-        NSLog("Dictation: %@", message)
+        log("Error: \(message)")
         overlay.show(.error)
         overlay.hide(after: 0.8)
         NSSound(named: "Basso")?.play()

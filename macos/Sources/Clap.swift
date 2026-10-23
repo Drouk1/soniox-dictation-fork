@@ -87,7 +87,7 @@ final class ClapListener {
         engine.prepare()
         do { try engine.start() } catch {
             input.removeTap(onBus: 0)
-            return NSLog("Dictation: clap listener failed: %@", error.localizedDescription)
+            return log("Clap listener failed: \(error.localizedDescription)")
         }
         self.engine = engine
         // Follow the default mic when it changes.
