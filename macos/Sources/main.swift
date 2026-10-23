@@ -2,17 +2,24 @@ import Accelerate
 import AppKit
 import AVFoundation
 import ServiceManagement
+import Speech
 
 let endpoint = URL(string: "wss://stt-rt.soniox.com/transcribe-websocket")!
 let model = "stt-rt-v5"
 let sampleRate = 16_000.0
 let minHold = 0.25
-// Hands-free mode (after a double clap) stops once the mic has been this quiet for this long.
+// Hands-free mode (after a clap or the wake word) stops once the mic has been quiet for a while.
 let speechLevel: Float = 0.01  // about -40 dB
-let silenceTimeout = 3.0
 let maxHandsFree = 300.0
 
 let defaults = UserDefaults.standard
+defaults.register(defaults: [
+    "hotkey": 61,
+    "silenceTimeout": 3.0,
+    "sounds": true,
+    "enterWords": "over, enter, όβερ, έντερ",
+    "wakeWords": "hey claude, hey cloud",
+])
 
 let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Dictation.log")
 
@@ -42,11 +49,34 @@ let hotKeys = [
     HotKey(code: 63, flag: .function, name: "fn"),
 ]
 
-var hotKey: HotKey { hotKeys.first { $0.code == defaults.integer(forKey: "hotkey") } ?? hotKeys[0] }
+/// nil when the hotkey is turned off.
+var hotKey: HotKey? { hotKeys.first { $0.code == defaults.integer(forKey: "hotkey") } }
 
 func lines(_ key: String) -> [String] {
     (defaults.string(forKey: key) ?? "").split(whereSeparator: \.isNewline)
         .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+}
+
+/// A setting holding a list separated by commas or new lines.
+func items(_ key: String) -> [String] {
+    (defaults.string(forKey: key) ?? "").split(whereSeparator: { $0 == "," || $0.isNewline })
+        .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+}
+
+/// Splits off a trailing Enter word: "Send it, over." → ("Send it", true).
+func splitEnterWord(_ text: String) -> (text: String, enter: Bool) {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+    for word in items("enterWords") {
+        guard let range = trimmed.range(of: word, options: [.caseInsensitive, .diacriticInsensitive, .backwards, .anchored]) else { continue }
+        let rest = trimmed[..<range.lowerBound]
+        if let last = rest.last, last.isLetter || last.isNumber { continue }
+        return (rest.trimmingCharacters(in: CharacterSet(charactersIn: " ,:-–—").union(.newlines)), true)
+    }
+    return (text, false)
+}
+
+func play(_ sound: String) {
+    if defaults.bool(forKey: "sounds") { NSSound(named: sound)?.play() }
 }
 
 func languageHints() -> [String] {
@@ -365,7 +395,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var transcription: Transcription?
     private let settings = SettingsWindow()
     private var pressedAt = Date.distantPast
-    private let claps = ClapListener()
+    private let idle = IdleListener()
     private var handsFree = false
     private var lastSpeech = Date.distantPast
     private var lastInput = Date.distantPast
@@ -373,7 +403,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         log("Started, Accessibility \(AXIsProcessTrusted() ? "on" : "off")")
         buildMenu()
-        AVCaptureDevice.requestAccess(for: .audio) { _ in DispatchQueue.main.async { self.updateClapListener() } }
+        AVCaptureDevice.requestAccess(for: .audio) { _ in DispatchQueue.main.async { self.updateIdleListener() } }
         _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
         if !defaults.bool(forKey: "didRegisterLogin") {
             try? SMAppService.mainApp.register()
@@ -383,14 +413,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] in self?.flagsChanged($0); return $0 }
         recorder.onLevel = { [weak self] level in DispatchQueue.main.async { self?.heard(level) } }
-        claps.onDoubleClap = { [weak self] in
+        idle.onClap = { [weak self] in
             guard let self else { return }
             // Keys and trackpad clicks can sound like claps, so ignore claps heard while typing or clicking.
             guard Date().timeIntervalSince(lastInput) > 1.5 else { return }
-            begin(handsFree: true)
+            begin(.clap)
         }
+        idle.onWake = { [weak self] in self?.begin(.wake) }
         NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.updateClapListener()
+            self?.updateIdleListener()
         }
         if AXIsProcessTrusted() {
             startListening()
@@ -411,31 +442,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func flagsChanged(_ event: NSEvent) {
-        let key = hotKey
-        guard event.keyCode == key.code else { return }
-        event.modifierFlags.contains(key.flag) ? begin() : end()
+        guard let key = hotKey, event.keyCode == key.code else { return }
+        event.modifierFlags.contains(key.flag) ? begin(.hotkey) : end()
     }
 
-    private func begin(handsFree: Bool = false) {
+    enum Trigger: String { case hotkey, clap, wake }
+
+    private func begin(_ trigger: Trigger) {
         guard transcription == nil else { return }
         guard let apiKey = Keychain.read() else { return fail("No Soniox API key set") }
-        claps.stop()
+        idle.stop()
         let current = Transcription(apiKey: apiKey)
         recorder.onChunk = { current.send($0) }
         do {
             try recorder.start()
         } catch {
             current.cancel()
-            updateClapListener()
+            updateIdleListener()
             return fail(error.localizedDescription)
         }
         transcription = current
-        log("Listening (\(handsFree ? "clap" : "hotkey"), Accessibility \(AXIsProcessTrusted() ? "on" : "off"))")
+        log("Listening (\(trigger.rawValue), Accessibility \(AXIsProcessTrusted() ? "on" : "off"))")
         pressedAt = Date()
-        self.handsFree = handsFree
-        // A little extra time to start talking after the clap.
+        handsFree = trigger != .hotkey
+        // A little extra time to start talking after the clap or wake word.
         lastSpeech = Date().addingTimeInterval(1)
-        if handsFree { NSSound(named: "Tink")?.play() }
+        if handsFree { play("Tink") }
         overlay.show(.listening)
         setIcon(recording: true)
     }
@@ -444,15 +476,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         overlay.level = level
         guard handsFree, transcription != nil else { return }
         if level > speechLevel { lastSpeech = max(lastSpeech, Date()) }
-        if Date().timeIntervalSince(lastSpeech) > silenceTimeout || Date().timeIntervalSince(pressedAt) > maxHandsFree { end() }
+        let silence = defaults.double(forKey: "silenceTimeout")
+        if Date().timeIntervalSince(lastSpeech) > silence || Date().timeIntervalSince(pressedAt) > maxHandsFree {
+            play("Pop")
+            end()
+        }
     }
 
-    private func updateClapListener() {
-        if defaults.bool(forKey: "clapToStart"), transcription == nil {
-            claps.start()
-        } else {
-            claps.stop()
+    private func updateIdleListener() {
+        guard transcription == nil else { return idle.stop() }
+        var wake = defaults.bool(forKey: "wakeWord") && !items("wakeWords").isEmpty
+        if wake {
+            switch SFSpeechRecognizer.authorizationStatus() {
+            case .authorized: break
+            case .notDetermined:
+                SFSpeechRecognizer.requestAuthorization { _ in DispatchQueue.main.async { self.updateIdleListener() } }
+                wake = false
+            default: wake = false
+            }
         }
+        idle.start(claps: defaults.bool(forKey: "clapToStart"), wake: wake)
     }
 
     private func end() {
@@ -460,7 +503,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         recorder.stop()
         transcription = nil
         handsFree = false
-        updateClapListener()
+        updateIdleListener()
         setIcon(recording: false)
         guard Date().timeIntervalSince(pressedAt) >= minHold else {
             current.cancel()
@@ -473,9 +516,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             switch result {
             case .success(let text):
                 overlay.hide()
-                let text = applyReplacements(text)
-                log("Transcribed \(text.count) characters")
-                guard !text.isEmpty else { return }
+                let (spoken, enter) = splitEnterWord(text)
+                let text = applyReplacements(spoken)
+                let submit = enter || defaults.bool(forKey: "autoEnter")
+                log("Transcribed \(text.count) characters\(enter ? " + Enter word" : "")")
+                guard !text.isEmpty else {
+                    // Saying just "over" presses Enter.
+                    if enter, AXIsProcessTrusted() { pressKey(36) }
+                    return
+                }
                 // Without Accessibility access the paste keystroke is silently dropped, so keep the text.
                 guard AXIsProcessTrusted() else {
                     NSPasteboard.general.clearContents()
@@ -483,7 +532,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     openAccessibility()
                     return fail("Allow Accessibility access to paste. The text is on the clipboard, press ⌘V.")
                 }
-                paste(text, submit: defaults.bool(forKey: "autoEnter"))
+                paste(text, submit: submit)
             case .failure(let error):
                 fail(error.localizedDescription)
             }
@@ -494,7 +543,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         log("Error: \(message)")
         overlay.show(.error)
         overlay.hide(after: 0.8)
-        NSSound(named: "Basso")?.play()
+        play("Basso")
         statusItem.button?.toolTip = "Last error: \(message)"
     }
 
@@ -520,8 +569,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         let trusted = AXIsProcessTrusted()
-        let clap = defaults.bool(forKey: "clapToStart") ? ", or clap twice" : ""
-        menu.items.first?.title = trusted ? "Hold \(hotKey.name) and speak\(clap)" : "⚠️ Allow Accessibility access…"
+        var ways: [String] = []
+        if let key = hotKey { ways.append("hold \(key.name)") }
+        if defaults.bool(forKey: "clapToStart") { ways.append("clap twice") }
+        if defaults.bool(forKey: "wakeWord"), let phrase = items("wakeWords").first { ways.append("say “\(phrase)”") }
+        let start = ways.isEmpty ? "No way to start is turned on" : ways.joined(separator: ", ").capitalizingFirstLetter + " to dictate"
+        menu.items.first?.title = trusted ? start : "⚠️ Allow Accessibility access…"
         menu.items.first?.isEnabled = !trusted
     }
 
@@ -530,6 +583,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func openSettings() { settings.show() }
+}
+
+extension String {
+    var capitalizingFirstLetter: String { prefix(1).uppercased() + dropFirst() }
 }
 
 let app = NSApplication.shared

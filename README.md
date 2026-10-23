@@ -22,14 +22,15 @@ This installs `Dictation.app` to `~/Applications` and starts it. On first launch
 
 **Usage:** hold **right Option (⌥)** and speak. A small waveform shows at the bottom of the screen while it listens. Release the key, and the text is pasted.
 
-**Hands-free:** turn on **Clap twice to start** in Settings. Clap twice, speak, and stop talking. After 3 seconds of silence the text is pasted. Claps heard while you type or click are ignored. With this on, the microphone stays open while Dictation is idle, so macOS shows the orange mic indicator.
+**Hands-free:** in Settings, turn on **Clap twice** or **Say its name** (by default “Hey Claude”). Clap twice or say the name, wait for the sound, and speak. When you stop talking for 3 seconds the text is pasted. Claps heard while you type or click are ignored. The name is recognised on your Mac with Apple's on-device speech recognition, in English. While either option is on, the microphone stays open as Dictation waits, so macOS shows the orange mic indicator.
+
+**Enter words:** end with “over” or “enter” (or όβερ / έντερ) and Dictation drops the word and presses Enter. You can change the words in Settings.
 
 The app lives in the menu bar and starts at login. Open **Settings…** from the menu bar icon to change:
 
-- **Hotkey:** right Option, right Control, right Command or fn
-- **Clap twice to start**
-- **Press Enter after pasting**
-- **Launch at login**
+- **Start dictating:** hold a key (right Option, right Control, right Command, fn or off), clap twice, or say its name
+- **Finish:** how many seconds of silence end hands-free dictation, the Enter words, and whether to always press Enter
+- **General:** sounds, launch at login
 - **Vocabulary:** words you use often, one per line. Soniox recognises them more easily.
 - **Replacements:** fixes applied after transcription, one per line as `heard → written`. For example: `πούσαρε → push`. They ignore case and accents.
 - **Languages:** language hints. By default these are your system languages plus English.
@@ -71,7 +72,8 @@ To change the key later, run `python dictate.py --set-key`.
 ## Notes
 
 - After rebuilding the app, macOS may ask for Accessibility permission again. If the hotkey stops working, remove Dictation from the Accessibility list and add it again.
-- The clipboard is restored after each paste.
+- The clipboard is restored after each paste. If Accessibility access is missing, the text stays on the clipboard instead.
+- A log of what Dictation did (never what you said) is in `~/Library/Logs/Dictation.log`.
 
 ## License
 

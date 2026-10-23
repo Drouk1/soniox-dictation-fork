@@ -10,6 +10,7 @@
 	<key>CFBundleVersion</key><string>1</string>
 	<key>LSMinimumSystemVersion</key><string>13.0</string>
 	<key>LSUIElement</key><true/>
-	<key>NSMicrophoneUsageDescription</key><string>Dictation listens only while you hold its hotkey.</string>
+	<key>NSMicrophoneUsageDescription</key><string>Dictation listens while you dictate, and for claps or its name if you turn those on.</string>
+	<key>NSSpeechRecognitionUsageDescription</key><string>Dictation listens for its name on this Mac. Nothing is sent anywhere until you start dictating.</string>
 </dict>
 </plist>
