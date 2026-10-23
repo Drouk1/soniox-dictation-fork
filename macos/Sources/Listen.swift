@@ -8,9 +8,53 @@ func normalized(_ text: String) -> String {
         .split(separator: " ").joined(separator: " ")
 }
 
+/// A rough sound-alike spelling, so a Greek name matches what the English recognizer writes:
+/// "έλα μπίτζο" and "Ella Beetso" both become "elabiso".
+func soundKey(_ text: String) -> String {
+    var t = " " + normalized(text.applyingTransform(.toLatin, reverse: false) ?? text) + " "
+    for (from, to) in [(" mp", " b"), (" nt", " d"), (" gk", " g"), ("ph", "f"), ("ck", "k"), ("c", "k"), ("q", "k"),
+                       ("x", "ks"), ("tz", "s"), ("ts", "s"), ("dz", "s"), ("z", "s"), ("j", "s"),
+                       ("ee", "i"), ("ea", "i"), ("ie", "i"), ("y", "i"), ("oo", "u"), ("ou", "u"), ("w", "u"), ("h", "")] {
+        t = t.replacingOccurrences(of: from, with: to)
+    }
+    var key = ""
+    for c in t where c != " " && c != key.last { key.append(c) }
+    return key
+}
+
+func editDistance(_ a: String, _ b: String) -> Int {
+    let a = Array(a), b = Array(b)
+    var row = Array(0...b.count)
+    for i in 1...max(a.count, 1) where !a.isEmpty {
+        var previous = row[0]
+        row[0] = i
+        for j in 1...max(b.count, 1) where !b.isEmpty {
+            let current = row[j]
+            row[j] = min(row[j] + 1, row[j - 1] + 1, previous + (a[i - 1] == b[j - 1] ? 0 : 1))
+            previous = current
+        }
+    }
+    return a.isEmpty ? b.count : row[b.count]
+}
+
 func containsWakePhrase(_ text: String) -> Bool {
     let heard = " \(normalized(text)) "
-    return items("wakeWords").map(normalized).contains { !$0.isEmpty && heard.contains(" \($0) ") }
+    let words = normalized(text.applyingTransform(.toLatin, reverse: false) ?? text).split(separator: " ")
+    return items("wakeWords").contains { phrase in
+        let exact = normalized(phrase)
+        guard !exact.isEmpty else { return false }
+        if heard.contains(" \(exact) ") { return true }
+        // Otherwise compare by sound, over runs of about as many words as the phrase has.
+        let key = soundKey(phrase)
+        let count = exact.split(separator: " ").count
+        let allowed = max(1, key.count / 4)
+        for n in max(1, count - 1)...(count + 1) where n <= words.count {
+            for start in 0...(words.count - n) where editDistance(soundKey(words[start..<start + n].joined(separator: " ")), key) <= allowed {
+                return true
+            }
+        }
+        return false
+    }
 }
 
 /// Drops everything up to and including the wake phrase: "OK, hey Claude, write…" → "Write…".
@@ -85,12 +129,14 @@ final class IdleListener {
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.requiresOnDeviceRecognition = true
         request.shouldReportPartialResults = true
-        request.contextualStrings = items("wakeWords")
+        request.contextualStrings = items("wakeWords").map { normalized($0.applyingTransform(.toLatin, reverse: false) ?? $0) }
         lock.lock()
         self.request = request
         lock.unlock()
         task = recognizer.recognitionTask(with: request) { [weak self] result, error in
             let heard = result.map { containsWakePhrase($0.bestTranscription.formattedString) } ?? false
+            // For tuning names: `defaults write io.github.harabalos.dictation debugWake -bool true` logs what was heard.
+            if let result, defaults.bool(forKey: "debugWake") { log("Wake heard: \(result.bestTranscription.formattedString)") }
             let done = error != nil || result?.isFinal == true
             DispatchQueue.main.async { [weak self] in
                 guard let self, current == generation, wake else { return }

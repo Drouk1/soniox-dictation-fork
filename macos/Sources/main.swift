@@ -18,7 +18,7 @@ defaults.register(defaults: [
     "silenceTimeout": 3.0,
     "sounds": true,
     "enterWords": "over, enter, όβερ, έντερ",
-    "wakeWords": "hey claude, hey cloud, χέι κλοντ",
+    "wakeWords": "hey claude, hey cloud, χέι κλοντ, έλα μπίτζο, έλα ξα",
 ])
 
 let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Dictation.log")
@@ -231,6 +231,8 @@ final class Transcription {
     private var text = ""
     private var result: Result<String, Error>?
     private var completion: ((Result<String, Error>) -> Void)?
+    /// Called on the main queue with everything heard so far, including words Soniox may still revise.
+    var onText: ((String) -> Void)?
 
     init(apiKey: String) {
         var request = URLRequest(url: endpoint)
@@ -286,8 +288,14 @@ final class Transcription {
         if let code = obj["error_code"] {
             return complete(.failure(Self.error("Soniox \(code): \(obj["error_message"] ?? "")")))
         }
-        for token in obj["tokens"] as? [[String: Any]] ?? [] where token["is_final"] as? Bool == true {
-            if let t = token["text"] as? String, !t.hasPrefix("<") { text += t }
+        var pending = ""
+        for token in obj["tokens"] as? [[String: Any]] ?? [] {
+            guard let t = token["text"] as? String, !t.hasPrefix("<") else { continue }
+            if token["is_final"] as? Bool == true { text += t } else { pending += t }
+        }
+        if let onText {
+            let live = text + pending
+            DispatchQueue.main.async { onText(live) }
         }
         if obj["finished"] as? Bool == true {
             complete(.success(text.trimmingCharacters(in: .whitespacesAndNewlines)))
@@ -451,6 +459,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var handsFree = false
     private var lastSpeech = Date.distantPast
     private var lastInput = Date.distantPast
+    private var noiseFloor: Float = 0.003
+    private var enterHeard = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         log("Started, Accessibility \(AXIsProcessTrusted() ? "on" : "off")")
@@ -523,6 +533,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // After the wake word, send the last few seconds too: they hold the name and whatever followed it.
         router.attach(current, withRecent: trigger == .wake)
         transcription = current
+        enterHeard = false
+        // Hands-free, an Enter word at the end finishes right away instead of waiting for silence.
+        current.onText = { [weak self, weak current] live in
+            guard let self, let current, current === transcription, handsFree else { return }
+            enterHeard = splitEnterWord(live).enter
+        }
         self.trigger = trigger
         log("Listening (\(trigger.rawValue), Accessibility \(AXIsProcessTrusted() ? "on" : "off"))")
         pressedAt = Date()
@@ -536,10 +552,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func heard(_ level: Float) {
         overlay.level = level
+        // Follow the room's background noise: drop to quiet moments at once, rise slowly.
+        noiseFloor = max(level < noiseFloor ? level : noiseFloor + (level - noiseFloor) * 0.002, 0.0005)
         guard handsFree, transcription != nil else { return }
-        if level > speechLevel { lastSpeech = max(lastSpeech, Date()) }
+        if level > max(speechLevel, noiseFloor * 2.5) { lastSpeech = max(lastSpeech, Date()) }
+        let quiet = Date().timeIntervalSince(lastSpeech)
         let silence = defaults.double(forKey: "silenceTimeout")
-        if Date().timeIntervalSince(lastSpeech) > silence || Date().timeIntervalSince(pressedAt) > maxHandsFree {
+        if (enterHeard && quiet > 0.5) || quiet > silence || Date().timeIntervalSince(pressedAt) > maxHandsFree {
             play("Pop")
             end()
         }
@@ -573,6 +592,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         transcription = nil
         let trigger = trigger
         handsFree = false
+        enterHeard = false
         updateIdleListener()
         setIcon(recording: false)
         guard Date().timeIntervalSince(pressedAt) >= minHold else {
